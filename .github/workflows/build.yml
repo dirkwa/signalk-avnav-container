@@ -28,8 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write      # create the GitHub Release (consumed by the plugin's update check)
-      packages: write      # push to GHCR
-      id-token: write      # provenance / attestations
+      packages: write          # push to GHCR
+      id-token: write          # provenance / attestations
+      security-events: write   # upload Trivy SARIF to the Security tab
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +95,7 @@ jobs:
       - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
+        continue-on-error: true   # never block the Release on SARIF upload
         with:
           sarif_file: trivy.sarif
 
