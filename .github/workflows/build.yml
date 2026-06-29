@@ -1,0 +1,112 @@
+name: build-and-push
+
+# Builds the multi-arch AvNav image and publishes it to GHCR.
+# Triggers:
+#   - push to main that touches the build (Dockerfile / entrypoint / .avnav-version).
+#     To ship a new AvNav version, bump `.avnav-version` on main by hand.
+#   - manual dispatch with an explicit avnav_version
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "entrypoint.sh"
+      - ".avnav-version"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+    inputs:
+      avnav_version:
+        description: "AvNav package version to build (date, e.g. 20251028). Blank = use .avnav-version."
+        required: false
+        default: ""
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/signalk-avnav-container
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the GitHub Release (consumed by the plugin's update check)
+      packages: write      # push to GHCR
+      id-token: write      # provenance / attestations
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve AvNav version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.avnav_version }}"
+          [ -z "$V" ] && V="$(tr -d ' \n' < .avnav-version)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building AvNav $V"
+
+      - uses: docker/setup-qemu-action@v3      # arm64 emulation
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.version }}
+            type=raw,value=latest
+            type=sha,prefix=sha-
+          labels: |
+            net.wellenvogel.avnav.version=${{ steps.ver.outputs.version }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            AVNAV_VERSION=${{ steps.ver.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Trivy scan. Non-blocking by default — flip exit-code to 1 once the
+      # baseline is triaged.
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+          format: sarif
+          output: trivy.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+        continue-on-error: true
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+      # The plugin's update detection watches GitHub Releases on this repo
+      # (containers.updates.sources.githubReleases). One release per built version.
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: AvNav ${{ steps.ver.outputs.version }}
+          body: |
+            AvNav `${{ steps.ver.outputs.version }}` container build.
+
+            Image: `${{ env.IMAGE }}:${{ steps.ver.outputs.version }}`
+            Digest: `${{ steps.build.outputs.digest }}`
+          make_latest: true

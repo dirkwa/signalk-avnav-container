@@ -1,0 +1,3 @@
+*.log
+*.sarif
+.DS_Store
